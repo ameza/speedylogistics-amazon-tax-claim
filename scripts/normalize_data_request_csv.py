@@ -10,8 +10,10 @@ when you need the initial multi-year backfill and don't want to hammer
 Amazon with hundreds of full_details=True fetches).
 
 Fixes vs. the original single-purpose script this is derived from:
-- Tax is summed correctly for quantity > 1 (prefers `Shipment Item Subtotal
-  Tax`, falls back to `Unit Price Tax * Quantity`).
+- Tax is `Unit Price Tax * Quantity` summed over the order's items.
+  `Shipment Item Subtotal Tax` is NOT summed: it's the whole shipment's tax,
+  repeated on every item row of that shipment, so summing it counts the tax
+  once per item. It's only used as a per-shipment cross-check.
 - Uses Decimal, not float.
 - Emits the same canonical schema as the MCP path (Order ID, Order Date,
   Estimated Tax USD, Grand Total USD, Order Status, Shipping Address,
@@ -135,7 +137,6 @@ def main():
     with open_input(a.csv) as f:
         reader = csv.DictReader(f)
         cols = reader.fieldnames or []
-        has_subtotal_tax = "Shipment Item Subtotal Tax" in cols
         if "Order ID" not in cols or "Order Date" not in cols:
             sys.exit(f"ERROR: expected 'Order ID' and 'Order Date' columns, got: {cols}")
         for row in reader:
@@ -147,16 +148,17 @@ def main():
                 {
                     "date": row.get("Order Date", "").strip(),
                     "tax_unit": Decimal("0"),
-                    "tax_subtotal": Decimal("0"),
+                    "tax_by_shipment": {},
                     "statuses": set(),
                     "addresses": set(),
                     "tracking": set(),
                 },
             )
-            qty = int(money(row.get("Quantity") or row.get("Original Quantity")) or 1)
+            qty = money(row.get("Quantity") or row.get("Original Quantity"))
             o["tax_unit"] += money(row.get("Unit Price Tax")) * qty
-            if has_subtotal_tax:
-                o["tax_subtotal"] += money(row.get("Shipment Item Subtotal Tax"))
+            # Same value on every item row of a shipment -- keep one per shipment.
+            shipment = (row.get("Ship Date") or "", row.get("Carrier Name & Tracking Number") or "")
+            o["tax_by_shipment"][shipment] = money(row.get("Shipment Item Subtotal Tax"))
             o["statuses"].add((row.get("Order Status") or "").strip().lower())
             o["addresses"].add((row.get("Shipping Address") or "").strip())
             t = (row.get("Carrier Name & Tracking Number") or "").strip()
@@ -165,10 +167,11 @@ def main():
 
     rows = []
     for oid, o in orders.items():
-        tax = o["tax_subtotal"] if has_subtotal_tax and o["tax_subtotal"] > 0 else o["tax_unit"]
+        tax = o["tax_unit"]
+        shipment_tax = sum(o["tax_by_shipment"].values(), Decimal("0"))
         warnings = []
-        if has_subtotal_tax and o["tax_subtotal"] > 0 and o["tax_subtotal"] != o["tax_unit"]:
-            warnings.append(f"subtotal tax {o['tax_subtotal']} != unit tax x qty {o['tax_unit']} (used subtotal)")
+        if shipment_tax > 0 and shipment_tax != tax:
+            warnings.append(f"item tax {tax:.2f} != shipment tax {shipment_tax:.2f} (used item tax)")
         statuses = o["statuses"]
         if statuses & {"cancelled", "canceled"} and len(statuses) == 1:
             status = "cancelled_or_unsupported"
