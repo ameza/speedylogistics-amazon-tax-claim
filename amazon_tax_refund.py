@@ -62,7 +62,16 @@ FRESH_SESSION_HOURS = 20  # Speedy sessions last ~24h; re-login a bit early.
 
 DB_PATH = THIS_DIR / "orders.db"
 PDF_STORE_DIR = STAGING_DIR / "invoices"  # downloaded Speedy PDFs, reused across runs
-EARLIEST_DATE = "2000-01-01"  # stand-in for "no date filtering" -- build_claim.py needs a --from
+# Amazon only refunds within the delivery state's refund window; Florida
+# (Fla. Stat. 215.26) allows 3 years from when the tax was paid.
+REFUND_WINDOW_YEARS = 3
+
+
+def refund_cutoff(today):
+    try:
+        return today.replace(year=today.year - REFUND_WINDOW_YEARS)
+    except ValueError:  # Feb 29 -> Feb 28
+        return today.replace(year=today.year - REFUND_WINDOW_YEARS, day=28)
 
 CONFIG_DEFAULTS = {
     "to_email": "tax-exempt@amazon.com",
@@ -334,15 +343,17 @@ def db_upsert_orders(conn, orders_csv_path):
     return new_count, len(rows)
 
 
-def db_pending_for_speedy(conn):
+def db_pending_for_speedy(conn, cutoff):
     rows = conn.execute(
-        "SELECT order_id, tax_usd, tracking FROM orders WHERE claimed=0 AND speedy_status != 'success'"
+        "SELECT order_id, tax_usd, tracking FROM orders WHERE claimed=0 AND speedy_status != 'success' "
+        "AND substr(order_date, 1, 10) >= ?",
+        (cutoff.isoformat(),),
     ).fetchall()
     return [r for r in rows if _money(r["tax_usd"]) > 0]
 
 
-def write_pending_csv(conn, path):
-    pending = db_pending_for_speedy(conn)
+def write_pending_csv(conn, path, cutoff):
+    pending = db_pending_for_speedy(conn, cutoff)
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["Order ID", "Tracking Numbers"])
@@ -546,7 +557,19 @@ def run_pipeline():
             print(f"\n==> Tracking {total_count} orders in {DB_PATH} ({new_count} new this run).")
 
             pending_csv = work_dir / "pending.csv"
-            pending_count = write_pending_csv(conn, pending_csv)
+            cutoff = refund_cutoff(now.date())
+            expired = sum(
+                1 for r in conn.execute(
+                    "SELECT tax_usd FROM orders WHERE claimed=0 AND substr(order_date, 1, 10) < ?",
+                    (cutoff.isoformat(),),
+                )
+                if _money(r["tax_usd"]) > 0
+            )
+            print(
+                f"==> Only orders from {cutoff} onward can be claimed (Amazon follows Florida's\n"
+                f"    {REFUND_WINDOW_YEARS}-year sales-tax refund limit). Skipping {expired} older taxed order(s)."
+            )
+            pending_count = write_pending_csv(conn, pending_csv, cutoff)
 
             if pending_count:
                 print(f"==> {pending_count} order(s) need a Speedy check.")
@@ -586,7 +609,7 @@ def run_pipeline():
             run(
                 [
                     sys.executable, str(SCRIPTS_DIR / "build_claim.py"),
-                    "--csv", str(staging_csv), "--from", EARLIEST_DATE, "--to", str(now.date()),
+                    "--csv", str(staging_csv), "--from", str(cutoff), "--to", str(now.date()),
                     "--ledger", str(ledger_csv), "--matched", str(matched_csv), "--out-dir", str(claim_dir),
                 ],
                 desc="Building the claim",
@@ -622,7 +645,7 @@ def run_pipeline():
         print("\n" + "=" * 70)
         print("DONE")
         print("=" * 70)
-        print(f"Orders in this claim: {len(claim_rows)}  |  Total tax: ${total}")
+        print(f"Orders in this claim: {len(claim_rows)}  |  Total tax: ${total}  |  Ordered on or after {cutoff}")
         print(f"\n  - {email_path}  (email to send, order list included)")
         print(f"  - {zip_path}  ({len(pdfs)} invoice(s), {size_mb:.1f} MB -- attach to the email)")
         if missing:
@@ -630,6 +653,7 @@ def run_pipeline():
         if size_mb > limit_mb:
             print(f"\n==> WARNING: invoices.zip is over {limit_mb} MB -- split the claim into two emails.")
         print(
+            f"\nSend it soon: every day, the oldest orders in this claim move past the {REFUND_WINDOW_YEARS}-year limit.\n"
             "\nNothing was sent. Review the email, send it, then run python3 amazon_tax_refund.py again\n"
             f"and pick 'Mark orders as claimed' for this run ({run_id}), so they're never claimed twice."
         )

@@ -57,6 +57,10 @@ It never sends anything. You review the email and send it yourself.
 An order goes into a claim when:
 
 - it has sales tax,
+- it was ordered within the last 3 years. Amazon only refunds within the
+  delivery state's refund limit, and Florida's is 3 years
+  ([Fla. Stat. 215.26](https://www.flsenate.gov/Laws/Statutes/2025/215.26)).
+  Older orders are skipped and never checked with Speedy,
 - it isn't cancelled or possibly refunded,
 - Speedy has a package with its tracking number (so it went through the
   forwarder), and
