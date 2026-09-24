@@ -1,0 +1,9 @@
+# Personal data -- never commit
+config/config.json
+orders.db
+.cache/
+scripts/.speedy-session/
+*.zip
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*/
+
+__pycache__/

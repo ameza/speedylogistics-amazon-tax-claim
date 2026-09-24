@@ -1,0 +1,8 @@
+{
+  "to_email": "tax-exempt@amazon.com",
+  "from_email": "you@example.com",
+  "refund_method": "my original payment method or as Amazon Gift Card credit",
+  "attachment_size_limit_mb": 25,
+  "forwarder_name": "Speedy Logistics CR",
+  "signature": "Your Name"
+}
